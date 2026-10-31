@@ -135,3 +135,27 @@ function getLessonTitle(code: string, lessonNumber: number): string {
 export function calculateTotalHours(): number {
   return DISCIPLINES.reduce((acc, curr) => acc + curr.hours, 0);
 }
+
+export interface FinalExamQuestion {
+  id: string;
+  disciplineId: string;
+  questionNumber: number;
+  question: string;
+  options: string[];
+}
+
+export function getDisciplineFinalExam(disciplineId: string): FinalExamQuestion[] {
+  const discipline = DISCIPLINES.find(d => d.id === disciplineId) || DISCIPLINES[0];
+  return Array.from({ length: 10 }, (_, i) => ({
+    id: `${discipline.id}-final-q${i+1}`,
+    disciplineId: discipline.id,
+    questionNumber: i + 1,
+    question: `${i+1}. Questão final de ${discipline.title} - Princípio ${i+1}`,
+    options: [
+      `Alternativa correta sobre ${discipline.title}`,
+      `Alternativa incorreta A`,
+      `Alternativa incorreta B`,
+      `Alternativa incorreta C`,
+    ]
+  }));
+}
