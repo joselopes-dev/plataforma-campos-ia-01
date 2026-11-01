@@ -2,105 +2,115 @@ import pg from 'pg';
 import crypto from 'crypto';
 import { DISCIPLINES, calculateTotalHours, getDisciplineLessons, getDisciplineFinalExam } from '../db/seed-data.ts';
 import { 
-  User, 
-  UserRole, 
-  ExternalIdentity, 
-  StudentProgress, 
-  Certificate, 
-  ChatMessage, 
-  FinalExamAttempt, 
-  DisciplineApproval,
-  FinalExamQuestion 
+  User, UserRole, ExternalIdentity, StudentProgress, Certificate, 
+  ChatMessage, FinalExamAttempt, DisciplineApproval, FinalExamQuestion 
 } from '../types/index.ts';
 
-// Configuração do PostgreSQL Pool
 const connectionString = process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === 'production';
 const allowMemoryStore = process.env.ALLOW_MEMORY_STORE === 'true';
-//const isRenderPostgres = connectionString?.includes('render.com');
-const isRenderPostgres = connectionString?.includes('render.com') || connectionString?.includes('neon.tech');
+const isNeon = connectionString?.includes('neon.tech');
+const isRenderPostgres = connectionString?.includes('render.com') || isNeon;
 
 let pgPool: pg.Pool | null = null;
 let isPostgresConnected = false;
 let connectionError: string | null = null;
 
-// Inicializa pool caso DATABASE_URL exista e não seja URL placeholder
 if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
   try {
     pgPool = new pg.Pool({
       connectionString,
-      //ssl: isProduction || isRenderPostgres ? { rejectUnauthorized: false } : false,
-      ssl: { rejectUnauthorized: false },
+      ssl: isProduction || isRenderPostgres || isNeon ? { rejectUnauthorized: false } : false,
       max: 10,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      connectionTimeoutMillis: 15000,
     });
 
-    /**pgPool.query('SELECT NOW()', (err) => {
-      if (err) {
-        connectionError = err.message;
-        console.warn('⚠️ [DB] PostgreSQL não acessível no momento:', err.message);
-      } else {
-        isPostgresConnected = true;
-        console.log('✅ [DB] Conectado com sucesso ao PostgreSQL (Render / Produção)');
-      }
-    });*/
-
-
-        const seedDisciplines = async () => {
+    const seedDisciplinesNeonSafe = async () => {
+      if (!pgPool) return;
       try {
-        console.log('🔄 [DB] Verificando/semeando disciplinas...');
-        // Limpa progressos órfãos que causam foreign key
-        await pgPool!.query('DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)');
+        const colsRes = await pgPool.query(
+          `SELECT column_name FROM information_schema.columns WHERE table_name = 'disciplines'`
+        );
+        let existingCols = colsRes.rows.map((r:any) => r.column_name);
         
-        for (const d of DISCIPLINES) {
-          await pgPool!.query(
-            `INSERT INTO disciplines (id, module_id, total_lessons, local_material_path, code, title, hours)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET 
-               total_lessons = EXCLUDED.total_lessons,
-               local_material_path = EXCLUDED.local_material_path,
-               title = EXCLUDED.title`,
-            [d.id, (d as any).moduleId || (d as any).module_id, d.totalLessons, (d as any).localMaterialPath, (d as any).code, (d as any).title || (d as any).name, (d as any).hours || 10]
-          );
+        if (existingCols.length === 0) {
+          console.log('[DB] Tabela disciplines não existe no Neon, criando...');
+          await pgPool.query(`
+            CREATE TABLE IF NOT EXISTS disciplines (
+              id TEXT PRIMARY KEY,
+              code TEXT,
+              title TEXT,
+              name TEXT,
+              module_id TEXT,
+              hours INT,
+              total_lessons INT,
+              local_material_path TEXT
+            )
+          `);
+          existingCols = ['id','code','title','name','module_id','hours','total_lessons','local_material_path'];
         }
-        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas`);
-      } catch (e:any) {
-        // fallback se sua tabela tiver colunas diferentes (id, name, module_id...)
+
+        console.log('[DB] Colunas no Neon:', existingCols);
+
+        // Limpa progressos órfãos que causam o seu erro disc-01
         try {
-          for (const d of DISCIPLINES) {
-            await pgPool!.query(
-              `INSERT INTO disciplines (id, name, module_id, total_lessons, local_material_path)
-               VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO UPDATE SET total_lessons=$4`,
-              [d.id, (d as any).title || (d as any).name || d.id, (d as any).moduleId, d.totalLessons, (d as any).localMaterialPath]
-            );
-          }
-          console.log(`✅ [DB] Seed fallback OK`);
-        } catch (err2:any) {
-          console.warn('⚠️ [DB] Falha no auto-seed:', err2.message);
+          await pgPool.query(`DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)`);
+        } catch {}
+
+        for (const d of DISCIPLINES) {
+          const data: any = {
+            id: d.id,
+            code: (d as any).code,
+            title: (d as any).title || (d as any).name,
+            name: (d as any).title || (d as any).name,
+            module_id: (d as any).moduleId || (d as any).module_id,
+            hours: (d as any).hours || 10,
+            total_lessons: (d as any).totalLessons,
+            local_material_path: (d as any).localMaterialPath
+          };
+
+          const colsToInsert = Object.keys(data).filter(k => existingCols.includes(k) && data[k] !== undefined);
+          if (!colsToInsert.includes('id')) continue;
+
+          const values = colsToInsert.map((_, i) => `$${i+1}`).join(',');
+          const vals = colsToInsert.map(k => data[k]);
+
+          const updateSet = colsToInsert.filter(c => c !== 'id').map(c => `${c} = EXCLUDED.${c}`).join(', ');
+          const query = updateSet
+            ? `INSERT INTO disciplines (${colsToInsert.join(',')}) VALUES (${values}) ON CONFLICT (id) DO UPDATE SET ${updateSet}`
+            : `INSERT INTO disciplines (${colsToInsert.join(',')}) VALUES (${values}) ON CONFLICT (id) DO NOTHING`;
+
+          await pgPool.query(query, vals);
         }
+        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas no Neon/Render`);
+      } catch (e:any) {
+        console.warn('⚠️ [DB] Falha no auto-seed Neon:', e.message);
       }
     };
 
     pgPool.query('SELECT NOW()', async (err) => {
       if (err) {
         connectionError = err.message;
-        console.warn('⚠️ [DB] PostgreSQL não acessível no momento:', err.message);
+        console.warn('⚠️ [DB] PostgreSQL não acessível:', err.message);
       } else {
         isPostgresConnected = true;
-        console.log('✅ [DB] Conectado com sucesso ao PostgreSQL (Render / Produção)');
-        await seedDisciplines();
+        console.log(`✅ [DB] Conectado com sucesso ao PostgreSQL (${isNeon ? 'Neon' : 'Render'} / Produção)`);
+        await seedDisciplinesNeonSafe();
       }
     });
-
-    
   } catch (err: any) {
     connectionError = err.message;
-    console.warn('⚠️ [DB] Falha ao instanciar Pool PostgreSQL:', err.message);
+    console.warn('⚠️ [DB] Falha ao instanciar Pool:', err.message);
   }
 } else {
-  console.log('ℹ️ [DB] DATABASE_URL padrão/local. Armazenamento em memória disponível para desenvolvimento local.');
+  console.log('ℹ️ [DB] DATABASE_URL local. Modo memória.');
 }
+
+
+// ... RESTANTE DO SEU ARQUIVO CONTINUA IGUAL A PARTIR DAQUI ...
+// Cole todo o resto do seu memoryStore, QUIZ_ANSWERS, FINAL_EXAM_ANSWERS e o export const db = { ... } 
+// que você já me enviou, sem mudar nada
 
 /**
  * Verificação de Segurança Operacional para Produção
