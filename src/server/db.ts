@@ -29,8 +29,8 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
     const seedDisciplinesNeonSafe = async () => {
       if (!pgPool) return;
       try {
-        console.log('[DB] Verificando/semeando disciplinas (compatível com Neon)...');
-        await pgPool.query(`DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)`).catch(()=>{});
+        console.log('[DB] Verificando/semeando disciplinas e aulas (Neon)...');
+        await pgPool.query(`DELETE FROM student_progress`).catch(()=>{});
         for (let i = 0; i < DISCIPLINES.length; i++) {
           const d: any = DISCIPLINES[i];
           let modId = 1;
@@ -50,39 +50,54 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
           await pgPool.query(`
             INSERT INTO disciplines (id, order_num, code, module_id, title, hours, summary, local_material_path, competencies)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-            ON CONFLICT (id) DO UPDATE SET
-              order_num = EXCLUDED.order_num,
-              code = EXCLUDED.code,
-              module_id = EXCLUDED.module_id,
-              title = EXCLUDED.title,
-              hours = EXCLUDED.hours,
-              summary = EXCLUDED.summary,
-              local_material_path = EXCLUDED.local_material_path
+            ON CONFLICT (id) DO UPDATE SET title=EXCLUDED.title
           `, [id, order_num, code, modId, title, hours, summary, localPath, competencies]);
+          const lessons = getDisciplineLessons(id);
+          for (let j = 0; j < lessons.length; j++) {
+            const l: any = lessons[j];
+            const lessonId = l.id;
+            const lessonTitle = l.title || `Aula ${j+1}`;
+            const lessonOrder = l.order_num || (j+1);
+            try {
+              await pgPool.query(`
+                INSERT INTO lessons (id, discipline_id, order_num, title)
+                VALUES ($1,$2,$3,$4)
+                ON CONFLICT (id) DO NOTHING
+              `, [lessonId, id, lessonOrder, lessonTitle]);
+            } catch (e: any) {
+              try {
+                await pgPool.query(`
+                  INSERT INTO lessons (id, discipline_id)
+                  VALUES ($1,$2)
+                  ON CONFLICT (id) DO NOTHING
+                `, [lessonId, id]);
+              } catch (e2: any) {
+                console.warn(`[DB] Falha aula ${lessonId}: ${e2.message}`);
+              }
+            }
+          }
         }
-        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas no Neon`);
-      } catch (e:any) {
-        console.warn('⚠️ [DB] Falha no auto-seed Neon:', e.message);
+        console.log(`[DB] ${DISCIPLINES.length} disciplinas e aulas garantidas no Neon`);
+      } catch (e: any) {
+        console.warn('[DB] Falha no auto-seed Neon:', e.message);
       }
     };
 
     pgPool.query('SELECT NOW()', async (err) => {
       if (err) {
         connectionError = err.message;
-        console.warn('⚠️ [DB] PostgreSQL não acessível:', err.message);
+        console.warn('[DB] PostgreSQL nao acessivel:', err.message);
       } else {
         isPostgresConnected = true;
-        console.log(`✅ [DB] Conectado PostgreSQL (${isNeon ? 'Neon' : 'Render'})`);
+        console.log(`[DB] Conectado PostgreSQL (${isNeon ? 'Neon' : 'Render'})`);
         await seedDisciplinesNeonSafe();
       }
     });
-
   } catch (err: any) {
     connectionError = err.message;
-    console.warn('⚠️ [DB] Falha Pool:', err.message);
+    console.warn('[DB] Falha Pool:', err.message);
   }
 }
-
 /**
  * Verificação de Segurança Operacional para Produção
  */
