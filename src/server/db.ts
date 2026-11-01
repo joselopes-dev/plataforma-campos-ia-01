@@ -20,7 +20,7 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
   try {
     pgPool = new pg.Pool({
       connectionString,
-      ssl: isProduction || isRenderPostgres || isNeon ? { rejectUnauthorized: false } : false,
+      ssl: (isProduction || isRenderPostgres || isNeon) ? { rejectUnauthorized: false } : false,
       max: 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 15000,
@@ -29,61 +29,38 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
     const seedDisciplinesNeonSafe = async () => {
       if (!pgPool) return;
       try {
-        const colsRes = await pgPool.query(
-          `SELECT column_name FROM information_schema.columns WHERE table_name = 'disciplines'`
-        );
-        let existingCols = colsRes.rows.map((r:any) => r.column_name);
-        
-        if (existingCols.length === 0) {
-          console.log('[DB] Tabela disciplines não existe no Neon, criando...');
+        console.log('[DB] Verificando/semeando disciplinas (compatível com Neon)...');
+        await pgPool.query(`DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)`).catch(()=>{});
+        for (let i = 0; i < DISCIPLINES.length; i++) {
+          const d: any = DISCIPLINES[i];
+          let modId = 1;
+          if (typeof d.moduleId === 'number') modId = d.moduleId;
+          else if (typeof d.moduleId === 'string') {
+            const num = parseInt(d.moduleId.replace(/\D/g, ''));
+            if (!isNaN(num)) modId = num;
+          } else if (typeof d.module_id === 'number') modId = d.module_id;
+          const id = d.id;
+          const order_num = d.order_num || (i + 1);
+          const code = d.code || `DISC-${String(order_num).padStart(2,'0')}`;
+          const title = d.title || d.name || code;
+          const hours = d.hours || 10;
+          const summary = d.summary || d.title || `Disciplina ${title}`;
+          const localPath = d.localMaterialPath || d.local_material_path || `/materiais/${id}`;
+          const competencies = JSON.stringify(d.competencies || []);
           await pgPool.query(`
-            CREATE TABLE IF NOT EXISTS disciplines (
-              id TEXT PRIMARY KEY,
-              code TEXT,
-              title TEXT,
-              name TEXT,
-              module_id TEXT,
-              hours INT,
-              total_lessons INT,
-              local_material_path TEXT
-            )
-          `);
-          existingCols = ['id','code','title','name','module_id','hours','total_lessons','local_material_path'];
+            INSERT INTO disciplines (id, order_num, code, module_id, title, hours, summary, local_material_path, competencies)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+            ON CONFLICT (id) DO UPDATE SET
+              order_num = EXCLUDED.order_num,
+              code = EXCLUDED.code,
+              module_id = EXCLUDED.module_id,
+              title = EXCLUDED.title,
+              hours = EXCLUDED.hours,
+              summary = EXCLUDED.summary,
+              local_material_path = EXCLUDED.local_material_path
+          `, [id, order_num, code, modId, title, hours, summary, localPath, competencies]);
         }
-
-        console.log('[DB] Colunas no Neon:', existingCols);
-
-        // Limpa progressos órfãos que causam o seu erro disc-01
-        try {
-          await pgPool.query(`DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)`);
-        } catch {}
-
-        for (const d of DISCIPLINES) {
-          const data: any = {
-            id: d.id,
-            code: (d as any).code,
-            title: (d as any).title || (d as any).name,
-            name: (d as any).title || (d as any).name,
-            module_id: (d as any).moduleId || (d as any).module_id,
-            hours: (d as any).hours || 10,
-            total_lessons: (d as any).totalLessons,
-            local_material_path: (d as any).localMaterialPath
-          };
-
-          const colsToInsert = Object.keys(data).filter(k => existingCols.includes(k) && data[k] !== undefined);
-          if (!colsToInsert.includes('id')) continue;
-
-          const values = colsToInsert.map((_, i) => `$${i+1}`).join(',');
-          const vals = colsToInsert.map(k => data[k]);
-
-          const updateSet = colsToInsert.filter(c => c !== 'id').map(c => `${c} = EXCLUDED.${c}`).join(', ');
-          const query = updateSet
-            ? `INSERT INTO disciplines (${colsToInsert.join(',')}) VALUES (${values}) ON CONFLICT (id) DO UPDATE SET ${updateSet}`
-            : `INSERT INTO disciplines (${colsToInsert.join(',')}) VALUES (${values}) ON CONFLICT (id) DO NOTHING`;
-
-          await pgPool.query(query, vals);
-        }
-        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas no Neon/Render`);
+        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas no Neon`);
       } catch (e:any) {
         console.warn('⚠️ [DB] Falha no auto-seed Neon:', e.message);
       }
@@ -95,17 +72,21 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
         console.warn('⚠️ [DB] PostgreSQL não acessível:', err.message);
       } else {
         isPostgresConnected = true;
-        console.log(`✅ [DB] Conectado com sucesso ao PostgreSQL (${isNeon ? 'Neon' : 'Render'} / Produção)`);
+        console.log(`✅ [DB] Conectado PostgreSQL (${isNeon ? 'Neon' : 'Render'})`);
         await seedDisciplinesNeonSafe();
       }
     });
+
   } catch (err: any) {
     connectionError = err.message;
-    console.warn('⚠️ [DB] Falha ao instanciar Pool:', err.message);
+    console.warn('⚠️ [DB] Falha Pool:', err.message);
   }
-} else {
-  console.log('ℹ️ [DB] DATABASE_URL local. Modo memória.');
 }
+
+/**
+ * Verificação de Segurança Operacional para Produção
+ */
+
 
 
 // ... RESTANTE DO SEU ARQUIVO CONTINUA IGUAL A PARTIR DAQUI ...
