@@ -36,7 +36,7 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
       connectionTimeoutMillis: 10000,
     });
 
-    pgPool.query('SELECT NOW()', (err) => {
+    /**pgPool.query('SELECT NOW()', (err) => {
       if (err) {
         connectionError = err.message;
         console.warn('⚠️ [DB] PostgreSQL não acessível no momento:', err.message);
@@ -44,7 +44,56 @@ if (connectionString && !connectionString.includes('localhost:5432/lms_ia')) {
         isPostgresConnected = true;
         console.log('✅ [DB] Conectado com sucesso ao PostgreSQL (Render / Produção)');
       }
+    });*/
+
+
+        const seedDisciplines = async () => {
+      try {
+        console.log('🔄 [DB] Verificando/semeando disciplinas...');
+        // Limpa progressos órfãos que causam foreign key
+        await pgPool!.query('DELETE FROM student_progress WHERE discipline_id NOT IN (SELECT id FROM disciplines)');
+        
+        for (const d of DISCIPLINES) {
+          await pgPool!.query(
+            `INSERT INTO disciplines (id, module_id, total_lessons, local_material_path, code, title, hours)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET 
+               total_lessons = EXCLUDED.total_lessons,
+               local_material_path = EXCLUDED.local_material_path,
+               title = EXCLUDED.title`,
+            [d.id, (d as any).moduleId || (d as any).module_id, d.totalLessons, (d as any).localMaterialPath, (d as any).code, (d as any).title || (d as any).name, (d as any).hours || 10]
+          );
+        }
+        console.log(`✅ [DB] ${DISCIPLINES.length} disciplinas garantidas`);
+      } catch (e:any) {
+        // fallback se sua tabela tiver colunas diferentes (id, name, module_id...)
+        try {
+          for (const d of DISCIPLINES) {
+            await pgPool!.query(
+              `INSERT INTO disciplines (id, name, module_id, total_lessons, local_material_path)
+               VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO UPDATE SET total_lessons=$4`,
+              [d.id, (d as any).title || (d as any).name || d.id, (d as any).moduleId, d.totalLessons, (d as any).localMaterialPath]
+            );
+          }
+          console.log(`✅ [DB] Seed fallback OK`);
+        } catch (err2:any) {
+          console.warn('⚠️ [DB] Falha no auto-seed:', err2.message);
+        }
+      }
+    };
+
+    pgPool.query('SELECT NOW()', async (err) => {
+      if (err) {
+        connectionError = err.message;
+        console.warn('⚠️ [DB] PostgreSQL não acessível no momento:', err.message);
+      } else {
+        isPostgresConnected = true;
+        console.log('✅ [DB] Conectado com sucesso ao PostgreSQL (Render / Produção)');
+        await seedDisciplines();
+      }
     });
+
+    
   } catch (err: any) {
     connectionError = err.message;
     console.warn('⚠️ [DB] Falha ao instanciar Pool PostgreSQL:', err.message);
